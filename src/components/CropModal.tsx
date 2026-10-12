@@ -1,5 +1,5 @@
 import React, { useState, useRef } from 'react';
-import ReactCrop, { Crop, centerCrop, makeAspectCrop } from 'react-image-crop';
+import ReactCrop, { Crop, centerCrop, makeAspectCrop, convertToPixelCrop } from 'react-image-crop';
 import 'react-image-crop/dist/ReactCrop.css';
 
 interface CropModalProps {
@@ -33,7 +33,10 @@ export default function CropModal({ imageSrc, maxDimension = 600, onCropComplete
   function onImageLoad(e: React.SyntheticEvent<HTMLImageElement>) {
     const { width, height } = e.currentTarget;
     const aspect = 4 / 5;
-    setCrop(centerAspectCrop(width, height, aspect));
+    const initial = centerAspectCrop(width, height, aspect);
+    setCrop(initial);
+    // Let "Apply" work without first dragging the crop box
+    setCompletedCrop(convertToPixelCrop(initial, width, height));
   }
 
   const handleComplete = async () => {

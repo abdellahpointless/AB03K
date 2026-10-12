@@ -398,10 +398,7 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
         setTakePic(url);
       }
     } catch (e) {
-      console.error('Failed to process image:', e);
-      if (cropTarget === 'new') setNewPicture(croppedBase64);
-      else if (cropTarget === 'edit' && editItem) setEditItem({ ...editItem, pictureUrl: croppedBase64 });
-      else if (cropTarget === 'take') setTakePic(croppedBase64);
+      reportError('Could not upload the picture', e);
     }
     setCropImageSrc(null);
     setCropTarget(null);
@@ -733,7 +730,7 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
                           const publicUrl = await processAvatarImage(file);
                           onUpdateUser({ avatarUrl: publicUrl });
                         } catch (err) {
-                          console.error('Failed to upload avatar:', err);
+                          reportError('Could not upload the picture', err);
                         }
                       }
                     }}
