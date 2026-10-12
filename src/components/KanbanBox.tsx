@@ -75,8 +75,10 @@ export default function KanbanBox({
     };
   }, [item.id, showHistory]);
 
-  const handlePointerDown = () => {
+  const handlePointerDown = (e: React.PointerEvent<HTMLDivElement>) => {
     if (!canManage) return;
+    // Holding a button (Take, Add, history...) must not open the editor
+    if ((e.target as HTMLElement).closest('button, input, a')) return;
     setIsPressing(true);
     pressTimer.current = setTimeout(() => {
       setIsPressing(false);

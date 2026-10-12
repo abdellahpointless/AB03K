@@ -1,10 +1,12 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, lazy, Suspense } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import Login from './components/Login';
 import KanbanRack from './components/KanbanRack';
-import AdminView from './components/AdminView';
 import { User } from './db';
-import { socket } from './socket';
+import { restoreSession, initializeData, logoutUser, updateOwnProfile, reportError } from './socket';
+
+// The admin console is large (charts, Excel export), so load it only when opened
+const AdminView = lazy(() => import('./components/AdminView'));
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
@@ -12,11 +14,14 @@ export default function App() {
   const [isInitializing, setIsInitializing] = useState(true);
 
   useEffect(() => {
-     const cached = localStorage.getItem('kanbanUser');
-     if (cached) {
-        setCurrentUser(JSON.parse(cached));
-     }
-     setIsInitializing(false);
+    restoreSession()
+      .then(user => {
+        if (user) {
+          setCurrentUser(user);
+          initializeData();
+        }
+      })
+      .finally(() => setIsInitializing(false));
   }, []);
 
   useEffect(() => {
@@ -40,7 +45,8 @@ export default function App() {
 
   const handleLogin = (user: User) => {
     setCurrentUser(user);
-    localStorage.setItem('kanbanUser', JSON.stringify(user));
+    localStorage.setItem('kanbanUser', JSON.stringify({ id: user.id }));
+    initializeData();
   };
 
   if (!currentUser) {
@@ -51,20 +57,24 @@ export default function App() {
     );
   }
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
     setCurrentUser(null);
     localStorage.removeItem('kanbanUser');
     setCurrentView('Kanban');
+    await logoutUser();
   };
 
-  const handleUpdateUser = async (updates: Partial<User>) => {
+  const handleUpdateUser = async (updates: Pick<Partial<User>, 'theme' | 'avatarUrl' | 'settings'>) => {
     if (!currentUser.id) return;
-    
-    socket.emit('updateUser', currentUser.id, updates);
-    const updatedUser = { ...currentUser, ...updates };
-    setCurrentUser(updatedUser);
-    localStorage.setItem('kanbanUser', JSON.stringify(updatedUser));
+    try {
+      await updateOwnProfile(currentUser.id, updates);
+      setCurrentUser({ ...currentUser, ...updates });
+    } catch (e) {
+      reportError('Could not save your settings', e);
+    }
   };
+
+  const canOpenAdmin = currentUser.role === 'Admin' || currentUser.role === 'Manager';
 
   return (
     <div className="relative min-h-screen bg-slate-50 dark:bg-[#0b0f19] text-slate-900 dark:text-slate-100 font-sans selection:bg-blue-500/20 overflow-x-hidden">
@@ -77,7 +87,7 @@ export default function App() {
 
       <div className="relative z-10">
         <AnimatePresence mode="wait">
-          {currentView === 'Admin' ? (
+          {currentView === 'Admin' && canOpenAdmin ? (
             <motion.div
               key="admin"
               initial={{ opacity: 0, x: 36 }}
@@ -86,10 +96,12 @@ export default function App() {
               transition={{ duration: 0.28, ease: [0.25, 1, 0.5, 1] }}
               className="min-h-screen"
             >
-              <AdminView 
-                currentUser={currentUser} 
-                onBack={() => setCurrentView('Kanban')} 
-              />
+              <Suspense fallback={null}>
+                <AdminView
+                  currentUser={currentUser}
+                  onBack={() => setCurrentView('Kanban')}
+                />
+              </Suspense>
             </motion.div>
           ) : (
             <motion.div

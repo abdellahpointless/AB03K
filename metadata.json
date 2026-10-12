@@ -1,6 +1,0 @@
-{
-  "name": "Kanban Inventory Rack",
-  "description": "A kanban rack simulator that tracks inventory quantities and alerts on critical stock limits with visual breathing effects.",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}

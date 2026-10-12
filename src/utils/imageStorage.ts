@@ -85,7 +85,7 @@ export function blobToDataUrl(blob: Blob): Promise<string> {
 /**
  * Uploads an image blob to Supabase Storage bucket 'kanban-images'.
  * Uses a unique UUID filename so browsers cache it permanently.
- * Falls back to compressed base64 DataURL if Supabase is offline or not configured.
+ * In offline mode (Supabase not configured) the image is kept as a base64 data URL.
  */
 export async function uploadImageToStorage(
   blob: Blob,
@@ -97,26 +97,19 @@ export async function uploadImageToStorage(
 
   const fileName = `${folder}/${crypto.randomUUID()}.jpg`;
 
-  try {
-    const { error: uploadError } = await supabase.storage
-      .from(BUCKET_NAME)
-      .upload(fileName, blob, {
-        contentType: 'image/jpeg',
-        cacheControl: '31536000', // 1 year browser cache
-        upsert: false
-      });
+  const { error: uploadError } = await supabase.storage
+    .from(BUCKET_NAME)
+    .upload(fileName, blob, {
+      contentType: 'image/jpeg',
+      cacheControl: '31536000', // 1 year browser cache
+      upsert: false
+    });
 
-    if (uploadError) {
-      console.warn(`Supabase Storage upload failed (${uploadError.message}), falling back to compressed local data URL:`, uploadError);
-      return blobToDataUrl(blob);
-    }
+  // Fail loudly rather than storing a large base64 image in the database
+  if (uploadError) throw uploadError;
 
-    const { data } = supabase.storage.from(BUCKET_NAME).getPublicUrl(fileName);
-    return data.publicUrl;
-  } catch (err) {
-    console.warn('Storage upload encountered an error, falling back to data URL:', err);
-    return blobToDataUrl(blob);
-  }
+  const { data } = supabase.storage.from(BUCKET_NAME).getPublicUrl(fileName);
+  return data.publicUrl;
 }
 
 /**
