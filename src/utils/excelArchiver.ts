@@ -209,7 +209,7 @@ export function downloadExcelBlob(data: Uint8Array | string, filename: string) {
 
 /**
  * Automatically groups all transactions by week, compiles Excel archives,
- * saves them in IndexedDB and syncs with server filesystem so files are permanently ready.
+ * and saves them in this browser's IndexedDB.
  */
 export async function syncAllWeeklyArchives(
   transactions: Transaction[],
@@ -271,20 +271,9 @@ export async function syncAllWeeklyArchives(
         isCurrentWeek: isCurrent
       };
 
-      // 1. Save in local IndexedDB (guaranteed permanent storage in browser)
+      // Saved in this browser's IndexedDB (the app is a static site, so there is no server disk)
       await localDb.weeklyArchives.put(record);
       results.push(record);
-
-      // 2. Also send to server to persist on server disk
-      try {
-        await fetch('/api/archives', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(record)
-        });
-      } catch {
-        // Server fetch is optional if offline
-      }
     } else {
       results.push(existing);
     }

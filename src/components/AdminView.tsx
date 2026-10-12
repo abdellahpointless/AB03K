@@ -8,21 +8,20 @@ import {
   Activity, ArrowUpRight, BarChart3, LineChart, Trophy, Package, Sparkles, AlertTriangle
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { socket, subscribeToSocketState, getSocketState, fetchUsersList, fetchTransactionsPage, fetchDashboardWindowTransactions } from '../socket';
+import { subscribeToSocketState, getSocketState, fetchUsersList, fetchTransactionsPage, fetchDashboardWindowTransactions, fetchAllTransactions, createUser, adminUpdateUser, deleteUser, updateSettings, reportError } from '../socket';
 import { localDb, WeeklyArchiveRecord } from '../db/indexedDb';
 import { syncAllWeeklyArchives, exportMasterExcel, downloadExcelBlob } from '../utils/excelArchiver';
 import { migrateAllBase64ToStorage } from '../utils/imageStorage';
 import { isSupabaseConfigured } from '../supabase';
 
 export default function AdminView({ currentUser, onBack }: { currentUser: User, onBack: () => void }) {
-  const [transactions, setTransactions] = useState<Transaction[]>(getSocketState().transactions);
+  const [allTxCount, setAllTxCount] = useState(0);
   const [users, setUsers] = useState<User[]>(getSocketState().users);
   const [items, setItems] = useState<KanbanItem[]>(getSocketState().items);
   const [globalSettings, setGlobalSettings] = useState(getSocketState().settings || { picturePosition: '50% 50%', pictureScale: 1.0 });
 
   useEffect(() => {
     return subscribeToSocketState((state) => {
-      setTransactions(state.transactions);
       setUsers(state.users);
       setItems(state.items);
       if (state.settings) setGlobalSettings(state.settings);
@@ -61,6 +60,12 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
   const [isMigrating, setIsMigrating] = useState(false);
   const [migrationProgress, setMigrationProgress] = useState<{ current: number; total: number; message: string } | null>(null);
   const [migrationResult, setMigrationResult] = useState<{ migratedItems: number; migratedTransactions: number; migratedUsers: number; failed: number } | null>(null);
+
+  useEffect(() => {
+    fetchTransactionsPage({ page: 1, pageSize: 1 })
+      .then(res => setAllTxCount(res.totalCount))
+      .catch(() => {});
+  }, []);
 
   const loadWeeklyArchives = async () => {
     try {
@@ -101,7 +106,7 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
     try {
       const res = await fetchTransactionsPage({
         page: currentPage,
-        pageSize: pageSize === 'All' ? 50 : pageSize,
+        pageSize: pageSize === 'All' ? Math.max(allTxCount, 1000) : pageSize,
         search: searchQuery
       });
       setPagedTransactions(res.transactions);
@@ -117,7 +122,7 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
     if (activeTab === 'transactions') {
       loadTransactionsPage();
     }
-  }, [activeTab, currentPage, pageSize, searchQuery]);
+  }, [activeTab, currentPage, pageSize, searchQuery, allTxCount]);
 
   useEffect(() => {
     if (activeTab !== 'dashboard') return;
@@ -174,25 +179,29 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
   const handleSyncArchives = async () => {
     setIsSyncingArchives(true);
     try {
-      const updated = await syncAllWeeklyArchives(transactions, items);
+      const allTransactions = await fetchAllTransactions();
+      setAllTxCount(allTransactions.length);
+      const updated = await syncAllWeeklyArchives(allTransactions, items);
       setWeeklyArchives(updated);
     } catch (e) {
-      console.error("Archive sync error:", e);
+      reportError('Could not build the weekly archives', e);
     } finally {
       setIsSyncingArchives(false);
     }
   };
 
   const handleDownloadArchive = (arch: WeeklyArchiveRecord) => {
-    if (arch.fileBase64) {
-      downloadExcelBlob(arch.fileBase64, arch.filename);
-    } else {
-      window.open(`/api/archives/${arch.id}/download`, '_blank');
-    }
+    downloadExcelBlob(arch.fileBase64, arch.filename);
   };
 
-  const handleExportMasterExcel = () => {
-    exportMasterExcel(transactions, items);
+  const handleExportMasterExcel = async () => {
+    try {
+      const allTransactions = await fetchAllTransactions();
+      setAllTxCount(allTransactions.length);
+      exportMasterExcel(allTransactions, items);
+    } catch (e) {
+      reportError('Could not export to Excel', e);
+    }
   };
   
   // User Mgmt
@@ -232,17 +241,25 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
       if (editUserForm.password && editUserForm.password.trim() !== '') {
           payload.password = editUserForm.password;
       }
-      await socket.emit('updateUser', editingUser.id!, payload);
-      setEditingUser(null);
-      loadUsers();
+      try {
+        await adminUpdateUser(editingUser.id!, payload.username || editingUser.username, payload.role || editingUser.role, payload.password);
+        setEditingUser(null);
+        loadUsers();
+      } catch (err) {
+        reportError('Could not save the user', err);
+      }
   };
   
-  const handleApplyGlobalSettings = () => {
-    socket.emit('updateSettings', {
-      picturePosition: `${testPosX}% ${testPosY}%`,
-      pictureScale: testScale
-    });
-    alert('Global settings applied to all users.');
+  const handleApplyGlobalSettings = async () => {
+    try {
+      await updateSettings({
+        picturePosition: `${testPosX}% ${testPosY}%`,
+        pictureScale: testScale
+      });
+      alert('Global settings applied to all users.');
+    } catch (e) {
+      reportError('Could not save the settings', e);
+    }
   };
 
   const handleAddUser = async (e: React.FormEvent) => {
@@ -250,36 +267,26 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
     if (!newUsername || !newPassword) return;
     
     try {
-      const newUser: User = {
-        username: newUsername,
-        password: newPassword,
-        role: newRole,
-        theme: 'dark',
-        settings: {
-          notificationMethod: 'none',
-          alertThreshold: 150
-        }
-      };
-      
-      await socket.emit('addUser', newUser);
+      await createUser(newUsername, newPassword, newRole);
       await loadUsers();
-      
+
       setNewUsername('');
       setNewPassword('');
       setNewRole('Operator');
     } catch (err) {
-      console.error(err);
-      alert("Error adding user.");
+      reportError('Could not add the user', err);
     }
   };
 
   const handleChangeRole = async (userId: string, newRole: Role) => {
+    const target = usersList.find(u => u.id === userId);
+    if (!target) return;
     try {
-      await socket.emit('updateUser', userId, { role: newRole });
-      await loadUsers();
+      await adminUpdateUser(userId, target.username, newRole);
     } catch (e) {
-      console.error(e);
+      reportError('Could not change the role', e);
     }
+    await loadUsers();
   };
 
   useEffect(() => {
@@ -519,32 +526,54 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
     };
   }, [dashboardTxs, items, users, usersList, chartTimeframe, withdrawersScope]);
 
-  const handleExportCSV = () => {
-    let csvContent = "data:text/csv;charset=utf-8,";
-    
-    // Items CSV section
-    csvContent += "=== ITEMS CONFIGURATION ===\r\n";
-    csvContent += "ID,Reference,Quantity,Security Limit\r\n";
+  const handleExportCSV = async () => {
+    // Quote every cell and neutralise spreadsheet formulas (=, +, -, @)
+    const cell = (value: unknown) => {
+      let text = value === undefined || value === null ? '' : String(value);
+      if (/^[=+\-@\t\r]/.test(text)) text = `'${text}`;
+      return `"${text.replace(/"/g, '""')}"`;
+    };
+    const row = (values: unknown[]) => values.map(cell).join(',') + '\r\n';
+
+    let allTransactions: Transaction[];
+    try {
+      allTransactions = await fetchAllTransactions();
+    } catch (e) {
+      reportError('Could not export to CSV', e);
+      return;
+    }
+
+    let csvContent = "=== ITEMS CONFIGURATION ===\r\n";
+    csvContent += row(['ID', 'Reference', 'Quantity', 'Security Limit']);
     items.forEach(item => {
-      csvContent += `${item.id},${item.reference},${item.quantity},${item.securityLimit}\r\n`;
+      csvContent += row([item.id, item.reference, item.quantity, item.securityLimit]);
     });
     csvContent += "\r\n";
 
-    // Transactions CSV section
     csvContent += "=== TRANSACTION HISTORY ===\r\n";
-    csvContent += "Date,Type,Reason,Reference,Quantity,PO Number,User,Item ID\r\n";
-    (pagedTransactions.length > 0 ? pagedTransactions : transactions).forEach(t => {
-      const dateString = new Date(t.date).toLocaleString().replace(/,/g, '');
-      csvContent += `${dateString},${t.type},${t.reason || 'Normal Use'},${t.reference},${t.quantity},${t.poNumber || 'N/A'},${t.username},${t.itemId}\r\n`;
+    csvContent += row(['Date', 'Type', 'Reason', 'Reference', 'Quantity', 'PO Number', 'User', 'Item ID']);
+    allTransactions.forEach(t => {
+      csvContent += row([
+        new Date(t.date).toLocaleString(),
+        t.type,
+        t.reason || (t.type === 'ADD' ? 'Restock' : 'Normal Use'),
+        t.reference,
+        t.quantity,
+        t.poNumber || 'N/A',
+        t.username,
+        t.itemId || ''
+      ]);
     });
 
-    const encodedUri = encodeURI(csvContent);
+    const blob = new Blob(['\ufeff' + csvContent], { type: 'text/csv;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
     const link = document.createElement("a");
-    link.setAttribute("href", encodedUri);
-    link.setAttribute("download", `admin_export_${new Date().toISOString().split('T')[0]}.csv`);
+    link.href = url;
+    link.download = `admin_export_${new Date().toISOString().split('T')[0]}.csv`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
   };
 
   const headerRef = React.useRef<HTMLElement>(null);
@@ -627,9 +656,9 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
               )}
             >
               Withdrawals & History
-              {transactions.length > 0 && (
+              {allTxCount > 0 && (
                 <span className="text-[11px] bg-slate-200/80 dark:bg-white/10 text-slate-700 dark:text-slate-300 px-2 py-0.5 rounded-full font-mono font-bold">
-                  {transactions.length}
+                  {allTxCount}
                 </span>
               )}
               {activeTab === 'transactions' && (
@@ -1366,7 +1395,7 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
                         </span>
                       </div>
                       <p className="text-xs text-slate-600 dark:text-slate-400 mt-0.5">
-                        <span className="font-semibold text-slate-900 dark:text-slate-200">{transactions.length.toLocaleString()} total records</span> stored permanently without row limits. All history is automatically saved to weekly Excel files.
+                        <span className="font-semibold text-slate-900 dark:text-slate-200">{allTxCount.toLocaleString()} total records</span> stored permanently without row limits. All history is automatically saved to weekly Excel files.
                       </p>
                     </div>
                   </div>
@@ -1629,7 +1658,7 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
                     </div>
                     <div className="liquid-glass-surface rounded-2xl p-3.5 border border-emerald-500/20">
                       <div className="text-emerald-700 dark:text-emerald-300 text-xs font-bold uppercase tracking-wider">Total Records Tracked</div>
-                      <div className="text-2xl font-extrabold text-slate-900 dark:text-white mt-1 liquid-glass-legible">{transactions.length.toLocaleString()}</div>
+                      <div className="text-2xl font-extrabold text-slate-900 dark:text-white mt-1 liquid-glass-legible">{allTxCount.toLocaleString()}</div>
                       <div className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">No 1000 record limit</div>
                     </div>
                     <div className="liquid-glass-surface rounded-2xl p-3.5 border border-emerald-500/20">
@@ -1869,7 +1898,11 @@ export default function AdminView({ currentUser, onBack }: { currentUser: User, 
                                         <button 
                                             onClick={async () => {
                                                 if (confirm(`Are you sure you want to delete user ${u.username}?`)) {
-                                                    await socket.emit('deleteUser', u.id);
+                                                    try {
+                                                        await deleteUser(u.id!);
+                                                    } catch (err) {
+                                                        reportError('Could not delete the user', err);
+                                                    }
                                                     await loadUsers();
                                                 }
                                             }}

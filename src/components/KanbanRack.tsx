@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { Package, Plus, Search, ArrowUp, ArrowDown, LogOut, Settings, Database, Camera, Trash2, GripVertical, PackageMinus, X } from 'lucide-react';
-import { User, KanbanItem, Transaction } from '../db';
+import { User, KanbanItem } from '../db';
+import type { StockChange } from '../socket';
 import { cn } from '../lib/utils';
 import KanbanBox from './KanbanBox';
 import CropModal from './CropModal';
-import { socket, subscribeToSocketState, getSocketState } from '../socket';
+import { subscribeToSocketState, getSocketState, addItem, updateItemDetails, deleteItem, reorderItems, adjustStock, undoTransaction, reportError } from '../socket';
 import { processItemImage, processProofImage, processAvatarImage } from '../utils/imageStorage';
 import { DndContext, closestCenter, DragEndEvent } from '@dnd-kit/core';
 import { SortableContext, arrayMove, rectSortingStrategy, useSortable } from '@dnd-kit/sortable';
@@ -39,7 +40,7 @@ function SortableKanbanBox({ item, ...props }: any) {
   );
 }
 
-export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpdateUser }: { currentUser: User, onAdminAccess: () => void, onLogout: () => void, onUpdateUser: (u: Partial<User>) => void }) {
+export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpdateUser }: { currentUser: User, onAdminAccess: () => void, onLogout: () => void, onUpdateUser: (u: Pick<Partial<User>, 'theme' | 'avatarUrl' | 'settings'>) => void }) {
   const [items, setItems] = useState<KanbanItem[]>(getSocketState().items);
   
   const [globalSettings, setGlobalSettings] = useState(getSocketState().settings || { picturePosition: '50% 50%', pictureScale: 1.0 });
@@ -99,9 +100,8 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
     reference: string;
     type: 'ADD' | 'REMOVE';
     quantityDelta: number;
-    previousQty: number;
     transactionId: string;
-    timeout: NodeJS.Timeout;
+    timeout: ReturnType<typeof setTimeout>;
   } | null>(null);
   
   // Crop Modal state
@@ -150,8 +150,10 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
                }
            }
         });
-        if (updates.length > 0) socket.emit('reorderItems', updates);
         setItems(newItems);
+        if (updates.length > 0) {
+          reorderItems(updates).catch(err => reportError('Could not save the new order', err));
+        }
     }
   };
 
@@ -161,49 +163,22 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
     if (!cleanRef) return;
     try {
       const existingItem = items.find(i => i.reference.toLowerCase() === cleanRef.toLowerCase());
+      // Item first, then its stock movement, so the log never points at a missing box
+      const target = existingItem ?? await addItem({
+        reference: cleanRef,
+        quantity: 0,
+        securityLimit: newSecurityLimit,
+        pictureUrl: newPicture || undefined,
+      });
 
-      if (existingItem) {
-        socket.emit('updateItem', existingItem.id, { quantity: existingItem.quantity + newQuantity });
-        if (newQuantity > 0) {
-          socket.emit('addTransaction', {
-            itemId: existingItem.id!,
-            reference: existingItem.reference,
-            type: 'ADD',
-            quantity: newQuantity,
-            date: Date.now(),
-            userId: currentUser.id!,
-            username: currentUser.username
-          });
-        }
-      } else {
-        const generatedId = crypto.randomUUID();
-        const newItem = {
-          id: generatedId,
-          reference: cleanRef,
-          quantity: newQuantity,
-          securityLimit: newSecurityLimit,
-          pictureUrl: newPicture || undefined,
-        };
-        
-        socket.emit('addItem', newItem);
-        
-        if (newQuantity > 0) {
-          socket.emit('addTransaction', {
-            itemId: generatedId,
-            reference: cleanRef,
-            type: 'ADD',
-            quantity: newQuantity,
-            date: Date.now(),
-            userId: currentUser.id!,
-            username: currentUser.username
-          });
-        }
+      if (newQuantity > 0) {
+        await adjustStock([{ item: target, delta: newQuantity }], currentUser);
       }
-      
+
       setNewReference(''); setNewQuantity(0); setNewSecurityLimit(0); setNewPicture(null);
       setIsAddModalOpen(false);
     } catch (e) {
-      console.error(e);
+      reportError('Could not add the box', e);
     }
   };
 
@@ -211,16 +186,21 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
     e.preventDefault();
     if (!editItem || !editItem.reference.trim() || !editItem.id) return;
     try {
-      socket.emit('updateItem', editItem.id, {
-        reference: editItem.reference,
-        quantity: editItem.quantity,
+      await updateItemDetails(editItem.id, {
+        reference: editItem.reference.trim(),
         securityLimit: editItem.securityLimit,
         pictureUrl: editItem.pictureUrl
       });
+      // A changed quantity is logged as a stock movement instead of silently overwritten
+      const current = items.find(i => i.id === editItem.id);
+      const delta = current ? editItem.quantity - current.quantity : 0;
+      if (current && delta !== 0) {
+        await adjustStock([{ item: current, delta, poNumber: 'MANUAL CORRECTION' }], currentUser);
+      }
       setEditModalOpen(false);
       setEditItem(null);
     } catch (e) {
-      console.error(e);
+      reportError('Could not save the box', e);
     }
   };
 
@@ -229,15 +209,15 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
     setDeleteModalOpen(true);
   };
 
-  const confirmDelete = () => {
+  const confirmDelete = async () => {
     if (itemToDelete) {
-      try {
-        socket.emit('deleteItem', itemToDelete);
-      } catch (e) {
-        console.error(e);
-      }
       setDeleteModalOpen(false);
       setItemToDelete(null);
+      try {
+        await deleteItem(itemToDelete);
+      } catch (e) {
+        reportError('Could not delete the box', e);
+      }
     }
   };
 
@@ -264,9 +244,8 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
         }
       }
 
-      // If all valid, process batch payloads
-      const itemUpdates: { id: string; quantity: number }[] = [];
-      const transactions: Transaction[] = [];
+      // If all valid, apply every take in one all-or-nothing call
+      const changes: StockChange[] = [];
 
       for (const [id, qty] of Object.entries(bulkTakeSelections) as [string, number][]) {
         if (qty <= 0) continue;
@@ -282,31 +261,17 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
             }
         }
 
-        itemUpdates.push({ id: targetItem.id!, quantity: newQty });
-        transactions.push({
-          id: crypto.randomUUID(),
-          itemId: targetItem.id!,
-          reference: targetItem.reference,
-          type: 'REMOVE',
-          reason: 'Normal Use',
-          quantity: qty,
-          poNumber: bulkTakePo,
-          pictureUrl: undefined,
-          date: Date.now(),
-          userId: currentUser.id!,
-          username: currentUser.username
-        });
+        changes.push({ item: targetItem, delta: -qty, reason: 'Normal Use', poNumber: bulkTakePo });
       }
 
-      // Single batched socket emit instead of 2N sequential roundtrips!
-      socket.emit('batchTake', { itemUpdates, transactions });
+      await adjustStock(changes, currentUser);
 
       setBulkTakeFinalModalOpen(false);
       setBulkModeActive(false);
       setBulkTakePo('');
       setBulkTakeSelections({});
     } catch (err) {
-      console.error(err);
+      reportError('Could not take the items', err);
     }
   };
 
@@ -315,6 +280,10 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
     if (!activeItem || !activeItem.id) return;
     if (takeReason === 'Normal Use' && !/^\d{12}$/.test(takePo)) {
       alert("PO must be exactly 12 numbers.");
+      return;
+    }
+    if (!Number.isInteger(takeQty) || takeQty < 1) {
+      alert("Quantity must be at least 1.");
       return;
     }
     if (takeQty > activeItem.quantity) {
@@ -334,21 +303,13 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
           }
       }
 
-      socket.emit('updateItem', activeItem.id, { quantity: newQty });
-      const transactionId = crypto.randomUUID();
-      socket.emit('addTransaction', {
-        id: transactionId,
-        itemId: activeItem.id,
-        reference: activeItem.reference,
-        type: 'REMOVE',
+      const [{ transactionId }] = await adjustStock([{
+        item: activeItem,
+        delta: -takeQty,
         reason: takeReason,
-        quantity: takeQty,
         poNumber: takePo,
-        pictureUrl: takePic,
-        date: Date.now(),
-        userId: currentUser.id!,
-        username: currentUser.username
-      });
+        pictureUrl: takePic
+      }], currentUser);
       setTakeModalOpen(false);
 
       if (pendingUndo) clearTimeout(pendingUndo.timeout);
@@ -357,14 +318,13 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
         reference: activeItem.reference,
         type: 'REMOVE',
         quantityDelta: takeQty,
-        previousQty: activeItem.quantity,
         transactionId,
         timeout: setTimeout(() => setPendingUndo(null), 5000),
       });
 
       setActiveItem(null);
     } catch (err) {
-      console.error(err);
+      reportError('Could not take the item', err);
     }
   };
 
@@ -377,19 +337,12 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
   const handleAddStockSubmit = async (e: React.FormEvent) => {
       e.preventDefault();
       if (!activeItem || !activeItem.id) return;
+      if (!Number.isInteger(addQty) || addQty < 1) {
+          alert("Quantity must be at least 1.");
+          return;
+      }
       try {
-          socket.emit('updateItem', activeItem.id, { quantity: activeItem.quantity + addQty });
-          const transactionId = crypto.randomUUID();
-          socket.emit('addTransaction', {
-              id: transactionId,
-              itemId: activeItem.id!,
-              reference: activeItem.reference,
-              type: 'ADD',
-              quantity: addQty,
-              date: Date.now(),
-              userId: currentUser.id!,
-              username: currentUser.username
-          });
+          const [{ transactionId }] = await adjustStock([{ item: activeItem, delta: addQty }], currentUser);
           setAddStockModalOpen(false);
 
           if (pendingUndo) clearTimeout(pendingUndo.timeout);
@@ -398,25 +351,26 @@ export default function KanbanRack({ currentUser, onAdminAccess, onLogout, onUpd
               reference: activeItem.reference,
               type: 'ADD',
               quantityDelta: addQty,
-              previousQty: activeItem.quantity,
               transactionId,
               timeout: setTimeout(() => setPendingUndo(null), 5000),
           });
 
           setActiveItem(null);
       } catch (err) {
-          console.error(err);
+          reportError('Could not add stock', err);
       }
   };
 
-  const handleUndo = () => {
+  const handleUndo = async () => {
       if (!pendingUndo) return;
       clearTimeout(pendingUndo.timeout);
-      
-      socket.emit('updateItem', pendingUndo.itemId, { quantity: pendingUndo.previousQty });
-      socket.emit('deleteTransaction', pendingUndo.transactionId);
-      
       setPendingUndo(null);
+      try {
+          // Reverses only this movement, so changes others made meanwhile are kept
+          await undoTransaction(pendingUndo.transactionId, pendingUndo.itemId);
+      } catch (err) {
+          reportError('Could not undo', err);
+      }
   };
 
   const startImageCrop = (e: React.ChangeEvent<HTMLInputElement>, target: 'new' | 'edit' | 'take') => {

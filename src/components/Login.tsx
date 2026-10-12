@@ -2,7 +2,7 @@ import React, { useState, useRef } from 'react';
 import { Package, AlertCircle } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { User } from '../db';
-import { loginUser, dataReady } from '../socket';
+import { loginUser } from '../socket';
 import { isSupabaseConfigured } from '../supabase';
 
 export default function Login({ onLogin }: { onLogin: (user: User) => void }) {
@@ -27,7 +27,6 @@ export default function Login({ onLogin }: { onLogin: (user: User) => void }) {
     setLoading(true);
     
     try {
-      if (dataReady) await dataReady;
       const user = await loginUser(username, password);
       
       if (user) {
@@ -83,7 +82,7 @@ export default function Login({ onLogin }: { onLogin: (user: User) => void }) {
                 <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-amber-500" />
                 <div>
                   <strong className="font-bold">Offline Local Mode Active</strong>
-                  <p className="mt-0.5 text-amber-700 dark:text-amber-300/90 leading-relaxed">Using persistent client-side database storage. To connect external cloud database, provide credentials in settings.</p>
+                  <p className="mt-0.5 text-amber-700 dark:text-amber-300/90 leading-relaxed">Data is only saved in this browser. Set VITE_SUPABASE_URL and VITE_SUPABASE_ANON_KEY when building to use the shared cloud database.</p>
                 </div>
               </motion.div>
             )}
@@ -112,6 +111,7 @@ export default function Login({ onLogin }: { onLogin: (user: User) => void }) {
               onChange={e => setUsername(e.target.value)}
               className="w-full px-4 py-3 liquid-glass-surface border border-slate-200/50 dark:border-white/10 text-slate-900 dark:text-white rounded-xl text-sm focus:ring-2 focus:ring-blue-500/50 outline-none transition-all"
               placeholder="e.g. admin"
+              autoComplete="username"
             />
           </div>
           
@@ -127,6 +127,7 @@ export default function Login({ onLogin }: { onLogin: (user: User) => void }) {
               onChange={e => setPassword(e.target.value)}
               className="w-full px-4 py-3 liquid-glass-surface border border-slate-200/50 dark:border-white/10 text-slate-900 dark:text-white rounded-xl text-sm focus:ring-2 focus:ring-blue-500/50 outline-none transition-all font-mono"
               placeholder="••••••"
+              autoComplete="current-password"
             />
           </div>
 
